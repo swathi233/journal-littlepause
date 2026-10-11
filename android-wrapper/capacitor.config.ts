@@ -7,7 +7,7 @@ const config: CapacitorConfig = {
   // After deploying your FastAPI app, replace this URL with your Railway HTTPS domain.
   // Example: https://your-app.up.railway.app
   server: {
-    url: 'https://REPLACE-WITH-YOUR-RAILWAY-DOMAIN',
+    url: 'https://journal-littlepause-production.up.railway.app/',
     cleartext: false
   }
 };
