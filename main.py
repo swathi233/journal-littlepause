@@ -10,7 +10,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-
 # --------------------------------------------------
 # 1. PATHS AND CONFIGURATION
 # --------------------------------------------------
