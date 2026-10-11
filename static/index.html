@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8eff2">
+  <meta name="description" content="A gentle space to check in, journal, and take a little pause.">
+  <title>Little Pause — your gentle corner</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icons/flower.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true">✿</div><div class="ambient ambient-two" aria-hidden="true">☁</div>
+  <header class="topbar">
+    <a class="brand" href="#home" aria-label="Little Pause home"><span class="brand-mark">☁</span><span>little pause<small>a softer moment for you</small></span></a>
+    <button id="install-btn" class="install-btn hidden" type="button">＋ Install app</button>
+  </header>
+  <main id="home" class="app-shell">
+    <section class="hero panel">
+      <div class="hero-copy"><p class="eyebrow">YOUR LITTLE CORNER OF CALM</p><h1>Take a breath.<br><span>Come back to you.</span></h1><p class="hero-sub">You don't have to figure everything out today. Just start where you are. ♡</p></div>
+      <div class="hero-sticker" aria-hidden="true"><span class="sticker-sparkle">✦</span><span class="sticker-cloud">☁</span><span class="sticker-face">˶ᵔ ᵕ ᵔ˶</span><span class="sticker-flower">✿</span></div>
+      <div class="tiny-note">a gentle reminder <span>♡</span></div>
+    </section>
+    <nav class="tabs" aria-label="App sections"><button class="tab active" data-tab="checkin">♡ Check-in</button><button class="tab" data-tab="journal">✎ My journal</button><button class="tab" data-tab="calm">♫ Calm space</button><button class="tab" data-tab="history">✿ Memories</button></nav>
+
+    <section id="tab-checkin" class="tab-panel">
+      <div class="section-heading"><div><p class="eyebrow">A MOMENT JUST FOR YOU</p><h2>How is your heart today?</h2></div><span class="heading-sticker" aria-hidden="true">🌷</span></div>
+      <div class="quote-card panel"><div class="quote-sticker" aria-hidden="true"><span>☁</span><i>✦</i></div><div><p class="quote-label">TODAY'S LITTLE NOTE</p><blockquote id="daily-quote">You are allowed to grow slowly.</blockquote><p class="quote-credit">a tiny reminder, just for you ♡</p></div><span class="quote-doodle" aria-hidden="true">✿</span></div>
+      <div class="panel form-panel"><h3>Pick the feeling closest to yours</h3><p class="muted">There are no wrong answers here.</p><div class="mood-grid" id="mood-grid"><button class="mood" data-mood="Great"><span>☀️</span>Great</button><button class="mood" data-mood="Good"><span>🌼</span>Good</button><button class="mood selected" data-mood="Okay"><span>☁️</span>Okay</button><button class="mood" data-mood="Low"><span>🌧️</span>Low</button><button class="mood" data-mood="Anxious"><span>🫧</span>Anxious</button></div>
+      <div class="sliders"><label class="slider-label"><span>Stress level <small>1 = light, 10 = heavy</small></span><output id="stress-out">5/10</output><input id="stress" type="range" min="1" max="10" value="5"></label><label class="slider-label"><span>Anxiety level <small>1 = calm, 10 = intense</small></span><output id="anxiety-out">5/10</output><input id="anxiety" type="range" min="1" max="10" value="5"></label><label class="slider-label"><span>Energy level <small>1 = sleepy, 10 = full of beans</small></span><output id="energy-out">5/10</output><input id="energy" type="range" min="1" max="10" value="5"></label></div>
+      <button class="primary-btn" id="start-journal">Continue to my journal <span>♡</span></button></div>
+      <div class="soft-tip"><span>🧸</span><p><strong>It's okay to be a work in progress.</strong><br>Your feelings deserve kindness, not judgement.</p></div>
+    </section>
+
+    <section id="tab-journal" class="tab-panel hidden"><div class="section-heading"><div><p class="eyebrow">LET IT OUT, GENTLY</p><h2>Your journal page</h2><p class="muted">This space is yours. Write as much or as little as you like.</p></div><span class="heading-sticker">📝</span></div>
+      <div class="panel form-panel"><label class="field-label" for="journal-text">What's taking up space in your mind?</label><textarea id="journal-text" rows="6" placeholder="Start with one small thought… no need to make it perfect."></textarea><label class="field-label" for="gratitude">One tiny thing I'm grateful for</label><textarea id="gratitude" rows="2" placeholder="A warm drink, a kind message, a quiet moment…"></textarea><label class="field-label" for="best-thing">Something kind I can do for myself</label><textarea id="best-thing" rows="2" placeholder="Rest, stretch, ask for help, take a little walk…"></textarea><div class="button-row"><button class="secondary-btn" id="back-checkin">← Back</button><button class="primary-btn" id="save-entry">Save this moment ♡</button></div><p id="save-message" class="status-message" role="status"></p></div></section>
+
+    <section id="tab-calm" class="tab-panel hidden"><div class="section-heading"><div><p class="eyebrow">SLOW DOWN A LITTLE</p><h2>Find your calm</h2><p class="muted">Choose the sound that feels kindest right now.</p></div><span class="heading-sticker">🎧</span></div>
+      <div class="panel music-panel"><div class="music-header"><div class="music-art" aria-hidden="true"><span>♫</span><i>✦</i><b>☁</b></div><div><p class="eyebrow">YOUR LITTLE SOUND GARDEN</p><h3 id="now-playing">A quiet moment</h3><p class="muted" id="music-caption">Choose a sound below to begin.</p></div></div><audio id="audio-player" preload="none"></audio><div class="player-controls"><button id="play-btn" class="primary-btn">▶ Play</button><button id="pause-btn" class="secondary-btn">Ⅱ Pause</button><button id="stop-btn" class="secondary-btn">■ Stop</button><label class="volume-label">Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="0.55"></label></div><div class="track-list" id="track-list"><button class="track selected" data-src="/static/audio/soft-chimes.wav" data-title="Soft chimes" data-caption="A gentle, dreamy little melody."><span class="track-icon">🎐</span><span><strong>Soft chimes</strong><small>gentle melody · 12 sec loop</small></span><span class="track-play">▶</span></button><button class="track" data-src="/static/audio/gentle-rain.wav" data-title="Gentle rain" data-caption="A soft rain-like hush for quiet moments."><span class="track-icon">🌧️</span><span><strong>Gentle rain</strong><small>rain ambience · 12 sec loop</small></span><span class="track-play">▶</span></button><button class="track" data-src="/static/audio/ocean-breath.wav" data-title="Ocean breath" data-caption="Slow, wave-like sounds to help you pause."><span class="track-icon">🌊</span><span><strong>Ocean breath</strong><small>ocean-inspired ambience · 12 sec loop</small></span><span class="track-play">▶</span></button><button class="track" data-src="/static/audio/forest-morning.wav" data-title="Forest morning" data-caption="Soft outdoor ambience with tiny bird-like tones."><span class="track-icon">🌿</span><span><strong>Forest morning</strong><small>nature-inspired ambience · 12 sec loop</small></span><span class="track-play">▶</span></button></div><p class="music-note">These are original, simple synthesized sound loops made for this demo. They are not recordings of real instruments or nature.</p></div>
+      <div class="panel breathing-panel"><div><p class="eyebrow">A LITTLE BREATH BREAK</p><h3>Let's breathe together</h3><p class="muted">Breathe in as the flower opens, then breathe out slowly.</p><button id="breathing-btn" class="secondary-btn">Start breathing</button></div><div id="breathing-orb" class="breathing-orb"><span>♡</span></div></div></section>
+
+    <section id="tab-history" class="tab-panel hidden"><div class="section-heading"><div><p class="eyebrow">LOOK HOW FAR YOU'VE COME</p><h2>Your little memories</h2><p class="muted">Every check-in counts, even the messy ones.</p></div><span class="heading-sticker">💌</span></div><div id="history-list" class="history-list"><div class="empty-state panel"><span>🌱</span><h3>Your memories will bloom here</h3><p>Save your first journal moment and come back whenever you need to.</p></div></div></section>
+    <footer><p>made with a little extra kindness <span>♡</span></p><small>Little Pause is a journaling tool, not a replacement for professional support.</small></footer>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body></html>

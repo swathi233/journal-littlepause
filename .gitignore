@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+journal.db
+.env
+android-wrapper/node_modules/
+android-wrapper/android/
+android-wrapper/www/
+android-wrapper/.gradle/
+android-wrapper/local.properties
+android-wrapper/*.jks
+android-wrapper/*.keystore

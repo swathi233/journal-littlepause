@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "Little Pause — Gentle Journal",
+  "short_name": "Little Pause",
+  "description": "A soft little space for journaling, reflection, and calming sounds.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fcf8f5",
+  "theme_color": "#f8eff2",
+  "categories": ["lifestyle", "health", "personalization"],
+  "icons": [
+    {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
