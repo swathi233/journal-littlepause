@@ -1,11 +1,10 @@
-
 import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -30,6 +29,12 @@ app = FastAPI(
     description="A gentle journaling and calming app",
     version="1.0.0",
 )
+
+
+def normalize_user_name(value: Optional[str]) -> str:
+    """Normalize a user name for per-user journal storage."""
+    cleaned = (value or "").strip()
+    return cleaned if cleaned else "friend"
 
 
 # --------------------------------------------------
@@ -67,7 +72,8 @@ def initialize_database():
                 energy INTEGER NOT NULL DEFAULT 5,
                 journal_text TEXT NOT NULL DEFAULT '',
                 gratitude TEXT NOT NULL DEFAULT '',
-                best_thing TEXT NOT NULL DEFAULT ''
+                best_thing TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT 'friend'
             )
             """
         )
@@ -88,6 +94,7 @@ def migrate_database():
         "journal_text": "TEXT NOT NULL DEFAULT ''",
         "gratitude": "TEXT NOT NULL DEFAULT ''",
         "best_thing": "TEXT NOT NULL DEFAULT ''",
+        "user_name": "TEXT NOT NULL DEFAULT 'friend'",
     }
 
     with get_connection() as conn:
@@ -105,7 +112,6 @@ def migrate_database():
                     f"ADD COLUMN {column} {definition}"
                 )
 
-        # Fill missing timestamps on older entries.
         conn.execute(
             """
             UPDATE journal_entries
@@ -113,6 +119,15 @@ def migrate_database():
             WHERE created_at = '' OR created_at IS NULL
             """,
             (datetime.now().isoformat(timespec="seconds"),),
+        )
+
+        conn.execute(
+            """
+            UPDATE journal_entries
+            SET user_name = ?
+            WHERE user_name IS NULL OR user_name = ''
+            """,
+            ("friend",),
         )
 
 
@@ -133,6 +148,7 @@ class JournalEntry(BaseModel):
     journal_text: str = Field(default="", max_length=12000)
     gratitude: str = Field(default="", max_length=2000)
     best_thing: str = Field(default="", max_length=2000)
+    user_name: str = Field(default="", max_length=100)
 
 
 # --------------------------------------------------
@@ -224,9 +240,10 @@ def health():
 
 @app.post("/api/entries", status_code=201)
 def save_entry(entry: JournalEntry):
-    """Save a new journal entry."""
+    """Save a new journal entry for the active user."""
 
     now = datetime.now().isoformat(timespec="seconds")
+    user_name = normalize_user_name(entry.user_name)
 
     try:
         with get_connection() as conn:
@@ -240,9 +257,10 @@ def save_entry(entry: JournalEntry):
                     energy,
                     journal_text,
                     gratitude,
-                    best_thing
+                    best_thing,
+                    user_name
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -253,6 +271,7 @@ def save_entry(entry: JournalEntry):
                     entry.journal_text,
                     entry.gratitude,
                     entry.best_thing,
+                    user_name,
                 ),
             )
 
@@ -263,6 +282,7 @@ def save_entry(entry: JournalEntry):
             "message": "Your journal entry was saved.",
             "id": entry_id,
             "created_at": now,
+            "user_name": user_name,
         }
 
     except sqlite3.Error as exc:
@@ -280,28 +300,33 @@ def save_entry(entry: JournalEntry):
 # --------------------------------------------------
 
 @app.get("/api/entries")
-def list_entries():
-    """Return the 100 most recent journal entries."""
+def list_entries(user_name: Optional[str] = Query(default=None)):
+    """Return the recent entries for a specific user."""
 
     try:
+        sql = """
+            SELECT
+                id,
+                created_at,
+                mood,
+                stress,
+                anxiety,
+                energy,
+                journal_text,
+                gratitude,
+                best_thing,
+                user_name
+            FROM journal_entries
+        """
+        params = []
+        if user_name is not None:
+            normalized = normalize_user_name(user_name)
+            sql += " WHERE user_name = ? "
+            params.append(normalized)
+        sql += " ORDER BY id DESC LIMIT 100"
+
         with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    id,
-                    created_at,
-                    mood,
-                    stress,
-                    anxiety,
-                    energy,
-                    journal_text,
-                    gratitude,
-                    best_thing
-                FROM journal_entries
-                ORDER BY id DESC
-                LIMIT 100
-                """
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
 
         return [dict(row) for row in rows]
 
@@ -317,15 +342,25 @@ def list_entries():
 # --------------------------------------------------
 
 @app.delete("/api/entries/{entry_id}")
-def delete_entry(entry_id: int):
-    """Delete a journal entry by its ID."""
+def delete_entry(
+    entry_id: int,
+    user_name: Optional[str] = Query(default=None),
+):
+    """Delete a journal entry by its ID for a specific user."""
 
     try:
         with get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM journal_entries WHERE id = ?",
-                (entry_id,),
-            )
+            if user_name is not None:
+                normalized = normalize_user_name(user_name)
+                cursor = conn.execute(
+                    "DELETE FROM journal_entries WHERE id = ? AND user_name = ?",
+                    (entry_id, normalized),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM journal_entries WHERE id = ?",
+                    (entry_id,),
+                )
 
             if cursor.rowcount == 0:
                 raise HTTPException(
