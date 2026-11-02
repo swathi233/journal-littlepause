@@ -14,12 +14,39 @@ const quotes = [
   'You are doing better than you give yourself credit for.',
   'A little pause is a lovely place to start.'
 ];
+
 const $ = (id) => document.getElementById(id);
+const USER_KEY = 'littlepause-user-name';
+
 let selectedMood = 'Okay';
 let installPrompt = null;
 const audio = $('audio-player');
-audio.loop = true;
-audio.volume = 0.55;
+if (audio) {
+  audio.loop = true;
+  audio.volume = 0.55;
+}
+
+function getCurrentUserName() {
+  const value = localStorage.getItem(USER_KEY) || '';
+  return value.trim() || 'friend';
+}
+
+function saveCurrentUserName(name) {
+  const cleaned = (name || '').trim();
+  if (!cleaned) return;
+  localStorage.setItem(USER_KEY, cleaned);
+  const nameInput = $('user-name');
+  if (nameInput && nameInput.value !== cleaned) {
+    nameInput.value = cleaned;
+  }
+}
+
+function applySavedUserName() {
+  const nameInput = $('user-name');
+  if (!nameInput) return;
+  const savedName = localStorage.getItem(USER_KEY) || '';
+  nameInput.value = savedName.trim();
+}
 
 // Stable daily quote based on the local calendar date.
 const today = new Date();
@@ -33,6 +60,14 @@ function showTab(name) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.tab)));
+
+applySavedUserName();
+
+$('user-name').addEventListener('input', (event) => {
+  const value = event.target.value.trim();
+  if (!value) return;
+  localStorage.setItem(USER_KEY, value);
+});
 
 document.querySelectorAll('.mood').forEach(btn => btn.addEventListener('click', () => {
   selectedMood = btn.dataset.mood;
@@ -52,14 +87,32 @@ async function readJsonResponse(response) {
   if (!response.ok) throw new Error(data.detail || 'Something went wrong. Please try again.');
   return data;
 }
+
 $('save-entry').addEventListener('click', async () => {
   const button = $('save-entry');
   const message = $('save-message');
+  const userName = ($('user-name').value || '').trim() || getCurrentUserName();
+  saveCurrentUserName(userName);
+
   button.disabled = true; button.textContent = 'Saving gently…'; message.textContent = '';
-  const payload = { mood: selectedMood, stress: Number($('stress').value), anxiety: Number($('anxiety').value), energy: Number($('energy').value), journal_text: $('journal-text').value.trim(), gratitude: $('gratitude').value.trim(), best_thing: $('best-thing').value.trim() };
+  const payload = {
+    mood: selectedMood,
+    stress: Number($('stress').value),
+    anxiety: Number($('anxiety').value),
+    energy: Number($('energy').value),
+    journal_text: $('journal-text').value.trim(),
+    gratitude: $('gratitude').value.trim(),
+    best_thing: $('best-thing').value.trim(),
+    user_name: userName
+  };
+
   try {
-    await readJsonResponse(await fetch('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }));
-    message.textContent = 'Saved with care. Thank you for checking in with yourself ♡';
+    await readJsonResponse(await fetch('/api/entries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }));
+    message.textContent = `Saved with care, ${userName}. Thank you for checking in with yourself ♡`;
     $('journal-text').value = ''; $('gratitude').value = ''; $('best-thing').value = '';
     setTimeout(() => showTab('history'), 850);
   } catch (error) { message.textContent = error.message; }
@@ -68,10 +121,16 @@ $('save-entry').addEventListener('click', async () => {
 
 async function loadHistory() {
   const container = $('history-list');
+  const userName = ($('user-name').value || '').trim() || getCurrentUserName();
+  saveCurrentUserName(userName);
+
   container.innerHTML = '<div class="empty-state panel"><span>🌷</span><p>Gathering your memories…</p></div>';
   try {
-    const entries = await readJsonResponse(await fetch('/api/entries'));
-    if (!entries.length) { container.innerHTML = '<div class="empty-state panel"><span>🌱</span><h3>Your memories will bloom here</h3><p>Save your first journal moment and come back whenever you need to.</p></div>'; return; }
+    const entries = await readJsonResponse(await fetch(`/api/entries?user_name=${encodeURIComponent(userName)}`));
+    if (!entries.length) {
+      container.innerHTML = '<div class="empty-state panel"><span>🌱</span><h3>Your memories will bloom here</h3><p>Save your first journal moment and come back whenever you need a gentle reset.</p></div>';
+      return;
+    }
     container.innerHTML = '';
     entries.forEach(entry => {
       const card = document.createElement('article'); card.className = 'history-card panel';
@@ -83,34 +142,61 @@ async function loadHistory() {
       const del = document.createElement('button'); del.className = 'delete-btn'; del.textContent = 'Delete'; del.setAttribute('aria-label', 'Delete this journal entry'); del.addEventListener('click', () => deleteEntry(entry.id));
       top.append(heading, del); card.append(top);
       const meta = document.createElement('div'); meta.className = 'history-meta';
-      [`Stress ${entry.stress}/10`, `Anxiety ${entry.anxiety}/10`, `Energy ${entry.energy}/10`].forEach(text => { const pill = document.createElement('span'); pill.className = 'pill'; pill.textContent = text; meta.append(pill); }); card.append(meta);
-      [['journal_text','A thought I shared'],['gratitude','Grateful for'],['best_thing','A kind thing for me']].forEach(([key,label]) => { if(entry[key]) { const p = document.createElement('p'); p.className = 'history-body'; const strong = document.createElement('strong'); strong.textContent = `${label}: `; p.append(strong, document.createTextNode(entry[key])); card.append(p); } });
+      [`Stress ${entry.stress}/10`, `Anxiety ${entry.anxiety}/10`, `Energy ${entry.energy}/10`].forEach(text => { const pill = document.createElement('span'); pill.className = 'pill'; pill.textContent = text; meta.appendChild(pill); });
+      card.append(meta);
+      [['journal_text', 'A thought I shared'], ['gratitude', 'Grateful for'], ['best_thing', 'A kind thing for me']].forEach(([key, label]) => {
+        if (entry[key]) {
+          const p = document.createElement('p');
+          p.innerHTML = `<strong>${label}:</strong> ${escapeHtml(entry[key])}`;
+          card.appendChild(p);
+        }
+      });
       container.append(card);
     });
-  } catch (error) { container.innerHTML = ''; const p = document.createElement('p'); p.className='status-message'; p.textContent = error.message; container.append(p); }
+  } catch (error) { container.innerHTML = ''; const p = document.createElement('p'); p.className = 'status-message'; p.textContent = error.message; container.append(p); }
 }
-function moodEmoji(mood) { return ({Great:'☀️',Good:'🌼',Okay:'☁️',Low:'🌧️',Anxious:'🫧'})[mood] || '♡'; }
-function formatDate(value) { if(!value) return 'A little moment'; const d = new Date(value); return Number.isNaN(d.getTime()) ? value : d.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}); }
-async function deleteEntry(id) { if(!confirm('Delete this memory? This cannot be undone.')) return; try { await readJsonResponse(await fetch(`/api/entries/${id}`, {method:'DELETE'})); loadHistory(); } catch(error) { alert(error.message); } }
+
+function moodEmoji(mood) { return ({ Great: '☀️', Good: '🌼', Okay: '☁️', Low: '🌧️', Anxious: '🫧' })[mood] || '♡'; }
+function formatDate(value) { if (!value) return 'A little moment'; const d = new Date(value); return Number.isNaN(d.getTime()) ? value : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+async function deleteEntry(id) {
+  if (!confirm('Delete this memory? This cannot be undone.')) return;
+  const userName = ($('user-name').value || '').trim() || getCurrentUserName();
+  try {
+    await readJsonResponse(await fetch(`/api/entries/${id}?user_name=${encodeURIComponent(userName)}`, { method: 'DELETE' }));
+    loadHistory();
+  } catch (error) {
+    const message = $('save-message');
+    if (message) message.textContent = error.message;
+  }
+}
 
 const tracks = [...document.querySelectorAll('.track')];
 function selectTrack(track, autoplay) {
   tracks.forEach(item => item.classList.toggle('selected', item === track));
   const src = track.dataset.src;
-  if (!audio.src.endsWith(src)) audio.src = src;
+  if (audio && !audio.src.endsWith(src)) audio.src = src;
   $('now-playing').textContent = track.dataset.title;
   $('music-caption').textContent = track.dataset.caption;
-  if (autoplay) audio.play().catch(() => { $('music-caption').textContent = 'Tap Play to start this sound on your device.'; });
+  if (audio && autoplay) audio.play().catch(() => { $('music-caption').textContent = 'Tap Play to start this sound on your device.'; });
 }
 tracks.forEach(track => track.addEventListener('click', () => selectTrack(track, true)));
-$('play-btn').addEventListener('click', () => { if(!audio.src || !tracks.some(t => audio.src.endsWith(t.dataset.src))) selectTrack(tracks[0], false); audio.play().catch(() => $('music-caption').textContent = 'Your device blocked playback. Tap Play once more.'); });
+$('play-btn').addEventListener('click', () => { if (!audio.src || !tracks.some(t => audio.src.endsWith(t.dataset.src))) selectTrack(tracks[0], false); audio.play().catch(() => $('music-caption').textContent = 'Tap Play to start this sound on your device.'); });
 $('pause-btn').addEventListener('click', () => audio.pause());
 $('stop-btn').addEventListener('click', () => { audio.pause(); audio.currentTime = 0; });
 $('volume').addEventListener('input', () => audio.volume = Number($('volume').value));
 
 let breathing = false;
-$('breathing-btn').addEventListener('click', () => { breathing = !breathing; $('breathing-orb').classList.toggle('breathe', breathing); $('breathing-btn').textContent = breathing ? 'Stop breathing exercise' : 'Start breathing'; $('breathing-orb').querySelector('span').textContent = breathing ? 'Breathe' : '♡'; });
+$('breathing-btn').addEventListener('click', () => { breathing = !breathing; $('breathing-orb').classList.toggle('breathe', breathing); $('breathing-btn').textContent = breathing ? 'Stop breathing' : 'Start breathing'; });
 
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('install-btn').classList.remove('hidden'); });
-$('install-btn').addEventListener('click', async () => { if(!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $('install-btn').classList.add('hidden'); });
+$('install-btn').addEventListener('click', async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $('install-btn').classList.add('hidden'); });
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
