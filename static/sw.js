@@ -1,4 +1,4 @@
-const CACHE_NAME = 'little-pause-v9';
+const CACHE_NAME = 'little-pause-v10';
 const APP_SHELL = ['/', '/static/styles.css', '/static/app.js', '/manifest.webmanifest', '/static/icons/flower.svg'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
@@ -10,6 +10,7 @@ self.addEventListener('activate', event => {
 });
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
+  // Auth and journal APIs are private and must always be served by the backend.
   if (event.request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
   event.respondWith(fetch(event.request).then(response => {
     if (response.ok && url.origin === self.location.origin) {

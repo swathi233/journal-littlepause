@@ -3,11 +3,11 @@ import hmac
 import os
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -15,18 +15,30 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "journal.db")))
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-
-app = FastAPI(title="Little Pause", description="A gentle journaling and calming app", version="1.0.0")
 SESSION_COOKIE = "littlepause_session"
+SESSION_LIFETIME = timedelta(days=30)
 PASSWORD_ITERATIONS = 310_000
+
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app = FastAPI(title="Little Pause", description="A gentle journaling and calming app", version="1.0.0")
 
 
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def request_is_https(request: Request) -> bool:
+    # HTTPS commonly terminates at the hosting provider's reverse proxy.
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
 
 
 def initialize_database():
@@ -80,7 +92,7 @@ def initialize_database():
                 conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {column} {definition}")
         conn.execute(
             "UPDATE journal_entries SET created_at = ? WHERE created_at = '' OR created_at IS NULL",
-            (datetime.now().isoformat(timespec="seconds"),),
+            (utc_now().isoformat(timespec="seconds"),),
         )
 
 
@@ -109,35 +121,41 @@ def password_digest(password: str, salt: bytes) -> bytes:
 def issue_session(user_id: int, request: Request, response: Response):
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires = datetime.now().timestamp() + 60 * 60 * 24 * 30
-    expires_at = datetime.fromtimestamp(expires).isoformat(timespec="seconds")
+    expires_at = utc_now() + SESSION_LIFETIME
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-            (token_hash, user_id, expires_at),
+            (token_hash, user_id, expires_at.isoformat(timespec="seconds")),
         )
     response.set_cookie(
-        SESSION_COOKIE,
-        token,
+        key=SESSION_COOKIE,
+        value=token,
         httponly=True,
-        secure=request.url.scheme == "https",
-        samesite="strict",
-        max_age=60 * 60 * 24 * 30,
+        secure=request_is_https(request),
+        samesite="lax",
+        max_age=int(SESSION_LIFETIME.total_seconds()),
         path="/",
     )
+    response.headers["Cache-Control"] = "no-store"
 
 
-def require_user(session: Optional[str] = Cookie(default=None)):
+def require_user(session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE)):
     if not session:
         raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
     token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
+    now = utc_now().isoformat(timespec="seconds")
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT users.id, users.username FROM user_sessions JOIN users ON users.id = user_sessions.user_id WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?",
-            (token_hash, datetime.now().isoformat(timespec="seconds")),
+            """
+            SELECT users.id, users.username
+            FROM user_sessions JOIN users ON users.id = user_sessions.user_id
+            WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?
+            """,
+            (token_hash, now),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
+        if row is None:
+            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
+            raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
     return {"id": row["id"], "username": row["username"], "token_hash": token_hash}
 
 
@@ -149,7 +167,7 @@ def home():
     index_file = STATIC_DIR / "index.html"
     if not index_file.is_file():
         raise HTTPException(status_code=404, detail="Frontend not found.")
-    return FileResponse(index_file)
+    return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/manifest.webmanifest")
@@ -165,12 +183,12 @@ def service_worker():
     path = STATIC_DIR / "sw.js"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="sw.js was not found.")
-    return FileResponse(path, media_type="application/javascript")
+    return FileResponse(path, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": "Little Pause", "timestamp": datetime.now().isoformat(timespec="seconds")}
+    return {"status": "ok", "app": "Little Pause", "timestamp": utc_now().isoformat(timespec="seconds")}
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -182,7 +200,7 @@ def register(credentials: Credentials, request: Request, response: Response):
         with get_connection() as conn:
             cursor = conn.execute(
                 "INSERT INTO users (username, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                (username, salt, digest, datetime.now().isoformat(timespec="seconds")),
+                (username, salt, digest, utc_now().isoformat(timespec="seconds")),
             )
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as exc:
@@ -205,43 +223,67 @@ def login(credentials: Credentials, request: Request, response: Response):
 
 
 @app.get("/api/auth/me")
-def current_user(user=__import__("fastapi").Depends(require_user)):
+def current_user(response: Response, user: dict = Depends(require_user)):
+    response.headers["Cache-Control"] = "no-store"
     return {"username": user["username"]}
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response, user=__import__("fastapi").Depends(require_user)):
+def logout(request: Request, response: Response, user: dict = Depends(require_user)):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request_is_https(request),
+        samesite="lax",
+    )
+    response.headers["Cache-Control"] = "no-store"
     return {"ok": True}
 
 
 @app.post("/api/entries", status_code=201)
-def save_entry(entry: JournalEntry, user=__import__("fastapi").Depends(require_user)):
-    now = datetime.now().isoformat(timespec="seconds")
+def save_entry(entry: JournalEntry, user: dict = Depends(require_user)):
+    now = utc_now().isoformat(timespec="seconds")
     with get_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO journal_entries (created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing, user_name, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (now, entry.mood, entry.stress, entry.anxiety, entry.energy, entry.journal_text, entry.gratitude, entry.best_thing, user["username"], user["id"]),
+            """
+            INSERT INTO journal_entries (
+                created_at, mood, stress, anxiety, energy, journal_text,
+                gratitude, best_thing, user_name, owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now, entry.mood, entry.stress, entry.anxiety, entry.energy, entry.journal_text,
+             entry.gratitude, entry.best_thing, user["username"], user["id"]),
         )
     return {"ok": True, "id": cursor.lastrowid, "created_at": now}
 
 
 @app.get("/api/entries")
-def list_entries(user=__import__("fastapi").Depends(require_user)):
+def list_entries(user: dict = Depends(require_user)):
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing FROM journal_entries WHERE owner_user_id = ? ORDER BY id DESC LIMIT 100",
+            """
+            SELECT id, created_at, mood, stress, anxiety, energy,
+                   journal_text, gratitude, best_thing
+            FROM journal_entries
+            WHERE owner_user_id = ?
+            ORDER BY id DESC
+            LIMIT 100
+            """,
             (user["id"],),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
 @app.delete("/api/entries/{entry_id}")
-def delete_entry(entry_id: int, user=__import__("fastapi").Depends(require_user)):
+def delete_entry(entry_id: int, user: dict = Depends(require_user)):
     with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM journal_entries WHERE id = ? AND owner_user_id = ?", (entry_id, user["id"]))
+        cursor = conn.execute(
+            "DELETE FROM journal_entries WHERE id = ? AND owner_user_id = ?",
+            (entry_id, user["id"]),
+        )
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Journal entry not found.")
     return {"ok": True, "id": entry_id}
