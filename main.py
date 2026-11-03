@@ -205,7 +205,7 @@ def register(credentials: Credentials, request: Request, response: Response):
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="That username already exists. Choose another or sign in.") from exc
     create_session(user_id, request, response)
-    return {"id": user_id, "username": username, "created": True}
+    return {"id": user_id, "username": username}
 
 
 @app.post("/api/auth/login")
@@ -232,8 +232,11 @@ def logout(request: Request, response: Response, user: dict = Depends(require_us
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
     response.delete_cookie(
-        key=SESSION_COOKIE, path="/", httponly=True,
-        secure=request_is_https(request), samesite="lax",
+        key=SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request_is_https(request),
+        samesite="lax",
     )
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True}
