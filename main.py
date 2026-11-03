@@ -3,7 +3,7 @@ import hmac
 import os
 import secrets
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +29,16 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def request_is_https(request: Request) -> bool:
+    # Railway and other reverse proxies terminate HTTPS before forwarding to Uvicorn.
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
 
 
 def initialize_database():
@@ -65,7 +75,7 @@ def initialize_database():
             )
         """)
 
-        # Migrate the original single-user journal table without deleting entries.
+        # Keep existing entries, but leave their ownership unset so they are not exposed to new accounts.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
         additions = {
             "created_at": "TEXT NOT NULL DEFAULT ''",
@@ -84,7 +94,7 @@ def initialize_database():
                 conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {name} {definition}")
         conn.execute(
             "UPDATE journal_entries SET created_at = ? WHERE created_at = '' OR created_at IS NULL",
-            (datetime.now().isoformat(timespec="seconds"),),
+            (now_utc().isoformat(timespec="seconds"),),
         )
 
 
@@ -113,7 +123,7 @@ def password_digest(password: str, salt: bytes) -> bytes:
 def create_session(user_id: int, request: Request, response: Response):
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires_at = datetime.utcnow() + SESSION_LIFETIME
+    expires_at = now_utc() + SESSION_LIFETIME
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
@@ -123,18 +133,19 @@ def create_session(user_id: int, request: Request, response: Response):
         key=SESSION_COOKIE,
         value=token,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=request_is_https(request),
         samesite="lax",
         max_age=int(SESSION_LIFETIME.total_seconds()),
         path="/",
     )
+    response.headers["Cache-Control"] = "no-store"
 
 
 def require_user(session: Optional[str] = Cookie(default=None)):
     if not session:
         raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
     token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = now_utc().isoformat(timespec="seconds")
     with get_connection() as conn:
         row = conn.execute(
             """
@@ -179,7 +190,7 @@ def service_worker():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": "Little Pause", "timestamp": datetime.now().isoformat(timespec="seconds")}
+    return {"status": "ok", "app": "Little Pause", "timestamp": now_utc().isoformat(timespec="seconds")}
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -191,7 +202,7 @@ def register(credentials: Credentials, request: Request, response: Response):
         with get_connection() as conn:
             cursor = conn.execute(
                 "INSERT INTO users (username, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                (username, salt, digest, datetime.now().isoformat(timespec="seconds")),
+                (username, salt, digest, now_utc().isoformat(timespec="seconds")),
             )
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as exc:
@@ -214,21 +225,29 @@ def login(credentials: Credentials, request: Request, response: Response):
 
 
 @app.get("/api/auth/me")
-def current_user(user: dict = Depends(require_user)):
+def current_user(response: Response, user: dict = Depends(require_user)):
+    response.headers["Cache-Control"] = "no-store"
     return {"id": user["id"], "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response, user: dict = Depends(require_user)):
+def logout(request: Request, response: Response, user: dict = Depends(require_user)):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
-    response.delete_cookie(key=SESSION_COOKIE, path="/", httponly=True, samesite="lax")
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request_is_https(request),
+        samesite="lax",
+    )
+    response.headers["Cache-Control"] = "no-store"
     return {"ok": True}
 
 
 @app.post("/api/entries", status_code=201)
 def save_entry(entry: JournalEntry, user: dict = Depends(require_user)):
-    now = datetime.now().isoformat(timespec="seconds")
+    now = now_utc().isoformat(timespec="seconds")
     with get_connection() as conn:
         cursor = conn.execute(
             """
