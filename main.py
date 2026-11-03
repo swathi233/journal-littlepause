@@ -73,7 +73,6 @@ def initialize_database():
                 owner_user_id INTEGER REFERENCES users(id)
             )
         """)
-
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
         additions = {
             "created_at": "TEXT NOT NULL DEFAULT ''",
@@ -118,17 +117,15 @@ def password_digest(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
 
 
-def issue_session(user_id: int, request: Request, response: Response):
+def create_session(user_id: int, request: Request, response: Response):
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     expires_at = utc_now() + SESSION_LIFETIME
-
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
             (token_hash, user_id, expires_at.isoformat(timespec="seconds")),
         )
-
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
@@ -144,25 +141,20 @@ def issue_session(user_id: int, request: Request, response: Response):
 def require_user(session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE)):
     if not session:
         raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
-
     token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
     now = utc_now().isoformat(timespec="seconds")
-
     with get_connection() as conn:
         row = conn.execute(
             """
             SELECT users.id, users.username
-            FROM user_sessions
-            JOIN users ON users.id = user_sessions.user_id
+            FROM user_sessions JOIN users ON users.id = user_sessions.user_id
             WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?
             """,
             (token_hash, now),
         ).fetchone()
-
         if row is None:
             conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
             raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
-
     return {"id": row["id"], "username": row["username"], "token_hash": token_hash}
 
 
@@ -203,7 +195,6 @@ def register(credentials: Credentials, request: Request, response: Response):
     username = credentials.username.strip()
     salt = secrets.token_bytes(16)
     digest = password_digest(credentials.password, salt)
-
     try:
         with get_connection() as conn:
             cursor = conn.execute(
@@ -212,10 +203,9 @@ def register(credentials: Credentials, request: Request, response: Response):
             )
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="That username is already registered. Please sign in instead.") from exc
-
-    issue_session(user_id, request, response)
-    return {"username": username}
+        raise HTTPException(status_code=409, detail="That username already exists. Choose another or sign in.") from exc
+    create_session(user_id, request, response)
+    return {"id": user_id, "username": username, "created": True}
 
 
 @app.post("/api/auth/login")
@@ -225,31 +215,25 @@ def login(credentials: Credentials, request: Request, response: Response):
             "SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE",
             (credentials.username.strip(),),
         ).fetchone()
-
     if row is None or not hmac.compare_digest(password_digest(credentials.password, row["password_salt"]), row["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect username or password.")
-
-    issue_session(row["id"], request, response)
-    return {"username": row["username"]}
+        raise HTTPException(status_code=401, detail="Incorrect username or password. If this is your first visit, choose Create account.")
+    create_session(row["id"], request, response)
+    return {"id": row["id"], "username": row["username"]}
 
 
 @app.get("/api/auth/me")
 def current_user(response: Response, user: dict = Depends(require_user)):
     response.headers["Cache-Control"] = "no-store"
-    return {"username": user["username"]}
+    return {"id": user["id"], "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response, user: dict = Depends(require_user)):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
-
     response.delete_cookie(
-        key=SESSION_COOKIE,
-        path="/",
-        httponly=True,
-        secure=request_is_https(request),
-        samesite="lax",
+        key=SESSION_COOKIE, path="/", httponly=True,
+        secure=request_is_https(request), samesite="lax",
     )
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True}
@@ -279,10 +263,7 @@ def list_entries(user: dict = Depends(require_user)):
             """
             SELECT id, created_at, mood, stress, anxiety, energy,
                    journal_text, gratitude, best_thing
-            FROM journal_entries
-            WHERE owner_user_id = ?
-            ORDER BY id DESC
-            LIMIT 100
+            FROM journal_entries WHERE owner_user_id = ? ORDER BY id DESC LIMIT 100
             """,
             (user["id"],),
         ).fetchall()

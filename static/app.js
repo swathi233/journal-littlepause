@@ -8,55 +8,35 @@ const quotes = [
   'You can feel things without fixing them right away.', 'There is no deadline for becoming yourself.',
   'You are doing better than you give yourself credit for.', 'A little pause is a lovely place to start.'
 ];
-let currentUser = null;
+let signedInUser = null;
 let selectedMood = 'Okay';
+let authMode = 'login';
 let installPrompt = null;
 const audio = $('audio-player');
 if (audio) { audio.loop = true; audio.volume = 0.55; }
-
 const appShell = document.querySelector('.app-shell');
 const topbar = document.querySelector('.topbar');
-const auth = document.createElement('section');
-auth.id = 'auth-screen';
-auth.innerHTML = `
-  <div class="auth-card">
-    <p class="eyebrow">A PRIVATE SPACE FOR YOU</p>
-    <h1 id="auth-title">Welcome back</h1>
-    <p id="auth-description">Sign in to see your personal journal.</p>
-    <form id="auth-form" novalidate>
-      <label for="auth-username">Username</label>
-      <input id="auth-username" name="username" autocomplete="username" maxlength="30" required>
-      <label for="auth-password">Password</label>
-      <input id="auth-password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
-      <div class="auth-actions">
-        <button id="auth-submit" class="primary-btn" type="submit">Sign in</button>
-        <button id="auth-switch" class="secondary-btn" type="button">Create account</button>
-      </div>
-      <p id="auth-error" class="status-message" aria-live="polite"></p>
-    </form>
-  </div>
-`;
-auth.style.cssText = 'position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:#f8eff2;padding:20px;overflow:auto';
-const authCard = auth.querySelector('.auth-card');
-authCard.style.cssText = 'box-sizing:border-box;width:min(100%,420px);padding:28px;border-radius:24px;background:#fff;box-shadow:0 12px 40px #50374725';
-authCard.querySelectorAll('label').forEach(el => { el.style.display = 'block'; el.style.margin = '14px 0 6px'; });
-authCard.querySelectorAll('input').forEach(el => { el.style.cssText = 'box-sizing:border-box;width:100%;padding:12px;border:1px solid #d8cbd1;border-radius:10px;font:inherit'; });
-authCard.querySelector('.auth-actions').style.cssText = 'display:flex;gap:10px;margin-top:16px';
-authCard.querySelector('#auth-error').style.cssText = 'min-height:1.4em;color:#a52e4c';
-document.body.prepend(auth);
+
+const authScreen = document.createElement('section');
+authScreen.id = 'auth-screen';
+authScreen.style.cssText = 'position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:#f8eff2;padding:20px;overflow:auto';
+authScreen.innerHTML = `<div id="auth-card" class="panel" style="box-sizing:border-box;width:min(100%,420px);padding:28px;border-radius:24px;background:#fff;box-shadow:0 12px 40px #50374725"><p class="eyebrow">A PRIVATE SPACE FOR YOU</p><h1 id="auth-title">Welcome back</h1><p id="auth-description" class="muted">Sign in to see your personal journal.</p><form id="auth-form" novalidate><label for="auth-username">Username</label><input id="auth-username" name="username" autocomplete="username" minlength="3" maxlength="30" required><label for="auth-password">Password</label><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required><p class="muted">Username: 3–30 letters, numbers, dots, dashes, or underscores. Password: 8–128 characters.</p><p id="auth-error" class="status-message" aria-live="polite"></p><button id="auth-submit" class="primary-btn" type="submit">Sign in</button> <button id="auth-switch" class="secondary-btn" type="button">Create account</button></form></div>`;
+authScreen.querySelectorAll('label').forEach(label => { label.style.display = 'block'; label.style.margin = '14px 0 6px'; });
+authScreen.querySelectorAll('input').forEach(input => { input.style.cssText = 'box-sizing:border-box;width:100%;padding:12px;border:1px solid #d8cbd1;border-radius:10px;font:inherit'; });
+document.body.prepend(authScreen);
 if (appShell) appShell.hidden = true;
 const accountBar = document.createElement('div');
+accountBar.id = 'account-bar';
 accountBar.hidden = true;
 accountBar.style.cssText = 'display:flex;align-items:center;gap:10px;margin-left:auto';
-accountBar.innerHTML = '<span id="account-name"></span><button id="logout-button" type="button">Sign out</button>';
+accountBar.innerHTML = '<span id="account-name"></span><button id="logout-button" class="secondary-btn" type="button">Sign out</button>';
 topbar?.append(accountBar);
 
-let authMode = 'login';
 function setAuthMode(mode) {
   authMode = mode;
   const registering = mode === 'register';
   $('auth-title').textContent = registering ? 'Create your private journal' : 'Welcome back';
-  $('auth-description').textContent = registering ? 'Choose a username and password. Your journal is private to this account.' : 'Sign in to see your personal journal.';
+  $('auth-description').textContent = registering ? 'Create an account to keep your journal private to you.' : 'Sign in to see your personal journal.';
   $('auth-submit').textContent = registering ? 'Create account' : 'Sign in';
   $('auth-switch').textContent = registering ? 'I already have an account' : 'Create account';
   $('auth-password').autocomplete = registering ? 'new-password' : 'current-password';
@@ -64,81 +44,84 @@ function setAuthMode(mode) {
 }
 $('auth-switch').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
 
-async function api(url, options = {}) {
+async function apiJson(url, options = {}) {
   let response;
   try { response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options }); }
-  catch { throw new Error('Cannot reach the server. Check your connection and try again.'); }
-  const type = response.headers.get('content-type') || '';
-  const result = type.includes('application/json') ? await response.json() : {};
-  if (!response.ok) throw new Error(result.detail || `Request failed (${response.status}).`);
-  return result;
+  catch { throw new Error('Cannot reach the app server. Check your connection and try again.'); }
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json() : {};
+  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status}).`);
+  return data;
 }
 
 function showSignedIn(user) {
-  currentUser = user;
-  auth.hidden = true;
+  signedInUser = user;
+  authScreen.hidden = true;
   if (appShell) appShell.hidden = false;
   accountBar.hidden = false;
-  accountBar.querySelector('#account-name').textContent = `Signed in as ${user.username}`;
-  const install = topbar?.querySelector('#install-btn');
-  if (install) install.hidden = false;
+  $('account-name').textContent = `Signed in as ${user.username}`;
+  if (topbar?.querySelector('#install-btn')) topbar.querySelector('#install-btn').hidden = false;
   if (document.querySelector('.tab.active')?.dataset.tab === 'history') loadHistory();
 }
-
 function showSignedOut() {
-  currentUser = null;
-  auth.hidden = false;
+  signedInUser = null;
+  authScreen.hidden = false;
   if (appShell) appShell.hidden = true;
   accountBar.hidden = true;
-  setAuthMode('login');
 }
 
 $('auth-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const button = $('auth-submit');
-  const errorBox = $('auth-error');
-  button.disabled = true;
-  errorBox.textContent = '';
   const username = $('auth-username').value.trim();
   const password = $('auth-password').value;
+  const submitButton = $('auth-submit');
+  const errorBox = $('auth-error');
+  errorBox.textContent = '';
+  if (username.length < 3 || username.length > 30 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
+    errorBox.textContent = 'Username must be 3–30 characters using letters, numbers, dots, dashes, or underscores.';
+    return;
+  }
+  if (password.length < 8 || password.length > 128) {
+    errorBox.textContent = 'Password must be between 8 and 128 characters.';
+    return;
+  }
+  submitButton.disabled = true;
+  submitButton.textContent = authMode === 'register' ? 'Creating account…' : 'Signing in…';
   try {
-    const user = await api(`/api/auth/${authMode === 'register' ? 'register' : 'login'}`, {
+    const user = await apiJson(`/api/auth/${authMode === 'register' ? 'register' : 'login'}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password })
     });
     $('auth-password').value = '';
+    if (authMode === 'register') errorBox.textContent = 'Account created. Opening your journal…';
     showSignedIn(user);
   } catch (error) {
     errorBox.textContent = error.message;
   } finally {
-    button.disabled = false;
+    submitButton.disabled = false;
+    submitButton.textContent = authMode === 'register' ? 'Create account' : 'Sign in';
   }
 });
 
 $('logout-button').addEventListener('click', async () => {
-  try { await api('/api/auth/logout', { method: 'POST' }); } catch (error) { console.warn(error); }
+  try { await apiJson('/api/auth/logout', { method: 'POST' }); }
+  catch (error) { console.error('Sign-out request failed:', error); }
   showSignedOut();
 });
 
-(async function restoreSession() {
-  try { showSignedIn(await api('/api/auth/me')); }
-  catch { showSignedOut(); }
-})();
-
-const dateNow = new Date();
-const quoteIndex = Math.floor(Date.UTC(dateNow.getFullYear(), dateNow.getMonth(), dateNow.getDate()) / 86400000) % quotes.length;
+const today = new Date();
+const quoteIndex = Math.floor(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) / 86400000) % quotes.length;
 if ($('daily-quote')) $('daily-quote').textContent = quotes[quoteIndex];
-
 function showTab(name) {
-  document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach(button => button.classList.toggle('active', button.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('hidden', panel.id !== `tab-${name}`));
   if (name === 'history') loadHistory();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
-document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.tab)));
-document.querySelectorAll('.mood').forEach(btn => btn.addEventListener('click', () => {
-  selectedMood = btn.dataset.mood;
-  document.querySelectorAll('.mood').forEach(m => m.classList.toggle('selected', m === btn));
+document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => showTab(button.dataset.tab)));
+document.querySelectorAll('.mood').forEach(button => button.addEventListener('click', () => {
+  selectedMood = button.dataset.mood;
+  document.querySelectorAll('.mood').forEach(mood => mood.classList.toggle('selected', mood === button));
 }));
 ['stress', 'anxiety', 'energy'].forEach(id => $(id)?.addEventListener('input', () => { $(`${id}-out`).textContent = `${$(id).value}/10`; }));
 $('start-journal')?.addEventListener('click', () => showTab('journal'));
@@ -147,20 +130,13 @@ $('back-checkin')?.addEventListener('click', () => showTab('checkin'));
 $('save-entry')?.addEventListener('click', async () => {
   const button = $('save-entry');
   const message = $('save-message');
-  button.disabled = true;
-  button.textContent = 'Saving gently…';
-  message.textContent = '';
+  button.disabled = true; button.textContent = 'Saving gently…'; message.textContent = '';
   const entry = {
-    mood: selectedMood,
-    stress: Number($('stress').value),
-    anxiety: Number($('anxiety').value),
-    energy: Number($('energy').value),
-    journal_text: $('journal-text').value.trim(),
-    gratitude: $('gratitude').value.trim(),
-    best_thing: $('best-thing').value.trim()
+    mood: selectedMood, stress: Number($('stress').value), anxiety: Number($('anxiety').value), energy: Number($('energy').value),
+    journal_text: $('journal-text').value.trim(), gratitude: $('gratitude').value.trim(), best_thing: $('best-thing').value.trim()
   };
   try {
-    await api('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) });
+    await apiJson('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) });
     message.textContent = 'Saved privately to your account ♡';
     $('journal-text').value = ''; $('gratitude').value = ''; $('best-thing').value = '';
     setTimeout(() => showTab('history'), 700);
@@ -172,10 +148,10 @@ $('save-entry')?.addEventListener('click', async () => {
 
 async function loadHistory() {
   const container = $('history-list');
-  if (!container || !currentUser) return;
+  if (!container || !signedInUser) return;
   container.innerHTML = '<div class="empty-state panel"><span>🌷</span><p>Gathering your memories…</p></div>';
   try {
-    const entries = await api('/api/entries');
+    const entries = await apiJson('/api/entries');
     if (!entries.length) {
       container.innerHTML = '<div class="empty-state panel"><span>🌱</span><h3>Your memories will bloom here</h3><p>Save your first journal moment and come back whenever you need a gentle reset.</p></div>';
       return;
@@ -198,17 +174,16 @@ async function loadHistory() {
       card.append(meta);
       [['journal_text', 'A thought I shared'], ['gratitude', 'Grateful for'], ['best_thing', 'A kind thing for me']].forEach(([key, label]) => {
         if (!entry[key]) return;
-        const p = document.createElement('p'); const strong = document.createElement('strong');
-        strong.textContent = `${label}: `; p.append(strong, document.createTextNode(entry[key])); card.append(p);
+        const paragraph = document.createElement('p'); const strong = document.createElement('strong');
+        strong.textContent = `${label}: `; paragraph.append(strong, document.createTextNode(entry[key])); card.append(paragraph);
       });
       container.append(card);
     });
   } catch (error) {
     if (error.message.includes('sign in') || error.message.includes('session expired')) showSignedOut();
-    container.replaceChildren(); const p = document.createElement('p'); p.className = 'status-message'; p.textContent = error.message; container.append(p);
+    container.replaceChildren(); const status = document.createElement('p'); status.className = 'status-message'; status.textContent = error.message; container.append(status);
   }
 }
-
 function moodEmoji(mood) { return ({ Great: '☀️', Good: '🌼', Okay: '☁️', Low: '🌧️', Anxious: '🫧' })[mood] || '♡'; }
 function formatDate(value) {
   if (!value) return 'A little moment';
@@ -217,7 +192,7 @@ function formatDate(value) {
 }
 async function deleteEntry(id) {
   if (!confirm('Delete this memory? This cannot be undone.')) return;
-  try { await api(`/api/entries/${id}`, { method: 'DELETE' }); loadHistory(); }
+  try { await apiJson(`/api/entries/${id}`, { method: 'DELETE' }); loadHistory(); }
   catch (error) { if (error.message.includes('sign in')) showSignedOut(); else alert(error.message); }
 }
 
@@ -249,3 +224,8 @@ $('install-btn')?.addEventListener('click', async () => {
   installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $('install-btn').classList.add('hidden');
 });
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+
+(async function restoreSession() {
+  try { showSignedIn(await apiJson('/api/auth/me')); }
+  catch { showSignedOut(); }
+})();
