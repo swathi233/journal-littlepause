@@ -36,7 +36,6 @@ def utc_now():
 
 
 def request_is_https(request: Request) -> bool:
-    # HTTPS commonly terminates at the hosting provider's reverse proxy.
     forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
     return request.url.scheme == "https" or forwarded_proto == "https"
 
@@ -74,6 +73,7 @@ def initialize_database():
                 owner_user_id INTEGER REFERENCES users(id)
             )
         """)
+
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
         additions = {
             "created_at": "TEXT NOT NULL DEFAULT ''",
@@ -122,11 +122,13 @@ def issue_session(user_id: int, request: Request, response: Response):
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     expires_at = utc_now() + SESSION_LIFETIME
+
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
             (token_hash, user_id, expires_at.isoformat(timespec="seconds")),
         )
+
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
@@ -142,20 +144,25 @@ def issue_session(user_id: int, request: Request, response: Response):
 def require_user(session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE)):
     if not session:
         raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
+
     token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
     now = utc_now().isoformat(timespec="seconds")
+
     with get_connection() as conn:
         row = conn.execute(
             """
             SELECT users.id, users.username
-            FROM user_sessions JOIN users ON users.id = user_sessions.user_id
+            FROM user_sessions
+            JOIN users ON users.id = user_sessions.user_id
             WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?
             """,
             (token_hash, now),
         ).fetchone()
+
         if row is None:
             conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
             raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
+
     return {"id": row["id"], "username": row["username"], "token_hash": token_hash}
 
 
@@ -164,10 +171,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/")
 def home():
-    index_file = STATIC_DIR / "index.html"
-    if not index_file.is_file():
+    path = STATIC_DIR / "index.html"
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Frontend not found.")
-    return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/manifest.webmanifest")
@@ -196,6 +203,7 @@ def register(credentials: Credentials, request: Request, response: Response):
     username = credentials.username.strip()
     salt = secrets.token_bytes(16)
     digest = password_digest(credentials.password, salt)
+
     try:
         with get_connection() as conn:
             cursor = conn.execute(
@@ -205,6 +213,7 @@ def register(credentials: Credentials, request: Request, response: Response):
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="That username is already registered. Please sign in instead.") from exc
+
     issue_session(user_id, request, response)
     return {"username": username}
 
@@ -216,8 +225,10 @@ def login(credentials: Credentials, request: Request, response: Response):
             "SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE",
             (credentials.username.strip(),),
         ).fetchone()
+
     if row is None or not hmac.compare_digest(password_digest(credentials.password, row["password_salt"]), row["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
+
     issue_session(row["id"], request, response)
     return {"username": row["username"]}
 
@@ -232,6 +243,7 @@ def current_user(response: Response, user: dict = Depends(require_user)):
 def logout(request: Request, response: Response, user: dict = Depends(require_user)):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
+
     response.delete_cookie(
         key=SESSION_COOKIE,
         path="/",
