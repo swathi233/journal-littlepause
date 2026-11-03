@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -91,9 +91,9 @@ class JournalEntry(BaseModel):
     best_thing: str = Field(default="", max_length=2000)
 
 
-def require_visitor(visitor_id: Optional[str] = Cookie(default=None)) -> str:
+def require_visitor(visitor_id: Optional[str] = Cookie(default=None, alias=VISITOR_COOKIE)) -> str:
     if not visitor_id or len(visitor_id) < 40:
-        raise HTTPException(status_code=401, detail="Visitor identity is missing. Refresh the page to continue.")
+        raise HTTPException(status_code=401, detail="Your browser identity is missing. Refresh the page to continue.")
     return owner_key(visitor_id)
 
 
@@ -130,7 +130,11 @@ def health():
 
 
 @app.get("/api/identity")
-def get_identity(request: Request, response: Response, visitor_id: Optional[str] = Cookie(default=None)):
+def get_identity(
+    request: Request,
+    response: Response,
+    visitor_id: Optional[str] = Cookie(default=None, alias=VISITOR_COOKIE),
+):
     # No account or password: a private random identifier is kept in this browser's first-party cookie.
     if not visitor_id or len(visitor_id) < 40:
         visitor_id = secrets.token_urlsafe(48)
@@ -148,7 +152,7 @@ def get_identity(request: Request, response: Response, visitor_id: Optional[str]
 
 
 @app.post("/api/entries", status_code=201)
-def save_entry(entry: JournalEntry, visitor: str = __import__("fastapi").Depends(require_visitor)):
+def save_entry(entry: JournalEntry, visitor: str = Depends(require_visitor)):
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     with get_connection() as conn:
         cursor = conn.execute(
@@ -165,7 +169,7 @@ def save_entry(entry: JournalEntry, visitor: str = __import__("fastapi").Depends
 
 
 @app.get("/api/entries")
-def list_entries(visitor: str = __import__("fastapi").Depends(require_visitor)):
+def list_entries(visitor: str = Depends(require_visitor)):
     with get_connection() as conn:
         rows = conn.execute(
             """
@@ -182,7 +186,7 @@ def list_entries(visitor: str = __import__("fastapi").Depends(require_visitor)):
 
 
 @app.delete("/api/entries/{entry_id}")
-def delete_entry(entry_id: int, visitor: str = __import__("fastapi").Depends(require_visitor)):
+def delete_entry(entry_id: int, visitor: str = Depends(require_visitor)):
     with get_connection() as conn:
         cursor = conn.execute(
             "DELETE FROM journal_entries WHERE id = ? AND owner_key = ?",
