@@ -8,6 +8,10 @@ const quotes = [
   'You can feel things without fixing them right away.', 'There is no deadline for becoming yourself.',
   'You are doing better than you give yourself credit for.', 'A little pause is a lovely place to start.'
 ];
+// The auth overlay has inline display:grid styling, so explicitly honor hidden elements.
+const hiddenFix = document.createElement('style');
+hiddenFix.textContent = '[hidden] { display: none !important; }';
+document.head.append(hiddenFix);
 let signedInUser = null;
 let selectedMood = 'Okay';
 let authMode = 'login';
@@ -48,8 +52,8 @@ async function apiJson(url, options = {}) {
   let response;
   try { response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options }); }
   catch { throw new Error('Cannot reach the app server. Check your connection and try again.'); }
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await response.json() : {};
+  const type = response.headers.get('content-type') || '';
+  const data = type.includes('application/json') ? await response.json() : {};
   if (!response.ok) throw new Error(data.detail || `Request failed (${response.status}).`);
   return data;
 }
@@ -57,16 +61,19 @@ async function apiJson(url, options = {}) {
 function showSignedIn(user) {
   signedInUser = user;
   authScreen.hidden = true;
-  if (appShell) appShell.hidden = false;
+  authScreen.style.display = 'none';
+  if (appShell) { appShell.hidden = false; appShell.style.removeProperty('display'); }
   accountBar.hidden = false;
   $('account-name').textContent = `Signed in as ${user.username}`;
-  if (topbar?.querySelector('#install-btn')) topbar.querySelector('#install-btn').hidden = false;
+  const installButton = topbar?.querySelector('#install-btn');
+  if (installButton) installButton.hidden = false;
   if (document.querySelector('.tab.active')?.dataset.tab === 'history') loadHistory();
 }
 function showSignedOut() {
   signedInUser = null;
   authScreen.hidden = false;
-  if (appShell) appShell.hidden = true;
+  authScreen.style.display = 'grid';
+  if (appShell) { appShell.hidden = true; appShell.style.display = 'none'; }
   accountBar.hidden = true;
 }
 
@@ -74,8 +81,8 @@ $('auth-form').addEventListener('submit', async event => {
   event.preventDefault();
   const username = $('auth-username').value.trim();
   const password = $('auth-password').value;
-  const submitButton = $('auth-submit');
   const errorBox = $('auth-error');
+  const button = $('auth-submit');
   errorBox.textContent = '';
   if (username.length < 3 || username.length > 30 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
     errorBox.textContent = 'Username must be 3–30 characters using letters, numbers, dots, dashes, or underscores.';
@@ -85,24 +92,22 @@ $('auth-form').addEventListener('submit', async event => {
     errorBox.textContent = 'Password must be between 8 and 128 characters.';
     return;
   }
-  submitButton.disabled = true;
-  submitButton.textContent = authMode === 'register' ? 'Creating account…' : 'Signing in…';
+  button.disabled = true;
+  button.textContent = authMode === 'register' ? 'Creating account…' : 'Signing in…';
   try {
     const user = await apiJson(`/api/auth/${authMode === 'register' ? 'register' : 'login'}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password })
     });
     $('auth-password').value = '';
-    if (authMode === 'register') errorBox.textContent = 'Account created. Opening your journal…';
     showSignedIn(user);
   } catch (error) {
     errorBox.textContent = error.message;
   } finally {
-    submitButton.disabled = false;
-    submitButton.textContent = authMode === 'register' ? 'Create account' : 'Sign in';
+    button.disabled = false;
+    button.textContent = authMode === 'register' ? 'Create account' : 'Sign in';
   }
 });
-
 $('logout-button').addEventListener('click', async () => {
   try { await apiJson('/api/auth/logout', { method: 'POST' }); }
   catch (error) { console.error('Sign-out request failed:', error); }
@@ -174,8 +179,8 @@ async function loadHistory() {
       card.append(meta);
       [['journal_text', 'A thought I shared'], ['gratitude', 'Grateful for'], ['best_thing', 'A kind thing for me']].forEach(([key, label]) => {
         if (!entry[key]) return;
-        const paragraph = document.createElement('p'); const strong = document.createElement('strong');
-        strong.textContent = `${label}: `; paragraph.append(strong, document.createTextNode(entry[key])); card.append(paragraph);
+        const p = document.createElement('p'); const strong = document.createElement('strong');
+        strong.textContent = `${label}: `; p.append(strong, document.createTextNode(entry[key])); card.append(p);
       });
       container.append(card);
     });
@@ -198,14 +203,17 @@ async function deleteEntry(id) {
 
 const tracks = [...document.querySelectorAll('.track')];
 function selectTrack(track, autoplay) {
+  if (!track) return;
   tracks.forEach(item => item.classList.toggle('selected', item === track));
   const src = track.dataset.src;
   if (audio && !audio.src.endsWith(src)) audio.src = src;
-  $('now-playing').textContent = track.dataset.title; $('music-caption').textContent = track.dataset.caption;
+  if ($('now-playing')) $('now-playing').textContent = track.dataset.title;
+  if ($('music-caption')) $('music-caption').textContent = track.dataset.caption;
   if (autoplay && audio) audio.play().catch(() => { $('music-caption').textContent = 'Tap Play to start this sound on your device.'; });
 }
 tracks.forEach(track => track.addEventListener('click', () => selectTrack(track, true)));
 $('play-btn')?.addEventListener('click', () => {
+  if (!audio) return;
   if (!audio.src || !tracks.some(track => audio.src.endsWith(track.dataset.src))) selectTrack(tracks[0], false);
   audio.play().catch(() => { $('music-caption').textContent = 'Tap Play to start this sound on your device.'; });
 });
@@ -215,7 +223,7 @@ $('volume')?.addEventListener('input', () => { if (audio) audio.volume = Number(
 let breathing = false;
 $('breathing-btn')?.addEventListener('click', () => {
   breathing = !breathing;
-  $('breathing-orb').classList.toggle('breathe', breathing);
+  $('breathing-orb')?.classList.toggle('breathe', breathing);
   $('breathing-btn').textContent = breathing ? 'Stop breathing' : 'Start breathing';
 });
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('install-btn')?.classList.remove('hidden'); });
