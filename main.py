@@ -1,68 +1,53 @@
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-# --------------------------------------------------
-# 1. PATHS AND CONFIGURATION
-# --------------------------------------------------
-
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-
-# Use a persistent disk path in your hosting platform if available.
-DB_PATH = Path(
-    os.getenv("DATABASE_PATH", str(BASE_DIR / "journal.db"))
-)
-
-# Create the static folder if it does not exist.
+DB_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "journal.db")))
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(
-    title="Little Pause",
-    description="A gentle journaling and calming app",
-    version="1.0.0",
-)
+app = FastAPI(title="Little Pause", description="A gentle journaling and calming app", version="1.0.0")
+SESSION_COOKIE = "littlepause_session"
+PASSWORD_ITERATIONS = 310_000
 
-
-def normalize_user_name(value: Optional[str]) -> str:
-    """Normalize a user name for per-user journal storage."""
-    cleaned = (value or "").strip()
-    return cleaned if cleaned else "friend"
-
-
-# --------------------------------------------------
-# 2. DATABASE CONNECTION
-# --------------------------------------------------
 
 def get_connection():
-    """Create a SQLite connection."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    conn = sqlite3.connect(
-        str(DB_PATH),
-        timeout=30,
-    )
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-# --------------------------------------------------
-# 3. DATABASE INITIALIZATION
-# --------------------------------------------------
-
 def initialize_database():
-    """Create the journal table if it does not exist."""
-
     with get_connection() as conn:
-        conn.execute(
-            """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_salt BLOB NOT NULL,
+                password_hash BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS journal_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL DEFAULT '',
@@ -73,72 +58,36 @@ def initialize_database():
                 journal_text TEXT NOT NULL DEFAULT '',
                 gratitude TEXT NOT NULL DEFAULT '',
                 best_thing TEXT NOT NULL DEFAULT '',
-                user_name TEXT NOT NULL DEFAULT 'friend'
+                user_name TEXT NOT NULL DEFAULT 'friend',
+                owner_user_id INTEGER REFERENCES users(id)
             )
-            """
-        )
-
-
-def migrate_database():
-    """
-    Add missing columns to an older database without
-    deleting existing journal entries.
-    """
-
-    required_columns = {
-        "created_at": "TEXT NOT NULL DEFAULT ''",
-        "mood": "TEXT NOT NULL DEFAULT 'Okay'",
-        "stress": "INTEGER NOT NULL DEFAULT 5",
-        "anxiety": "INTEGER NOT NULL DEFAULT 5",
-        "energy": "INTEGER NOT NULL DEFAULT 5",
-        "journal_text": "TEXT NOT NULL DEFAULT ''",
-        "gratitude": "TEXT NOT NULL DEFAULT ''",
-        "best_thing": "TEXT NOT NULL DEFAULT ''",
-        "user_name": "TEXT NOT NULL DEFAULT 'friend'",
-    }
-
-    with get_connection() as conn:
-        existing_columns = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(journal_entries)"
-            ).fetchall()
+        """)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
+        additions = {
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "mood": "TEXT NOT NULL DEFAULT 'Okay'",
+            "stress": "INTEGER NOT NULL DEFAULT 5",
+            "anxiety": "INTEGER NOT NULL DEFAULT 5",
+            "energy": "INTEGER NOT NULL DEFAULT 5",
+            "journal_text": "TEXT NOT NULL DEFAULT ''",
+            "gratitude": "TEXT NOT NULL DEFAULT ''",
+            "best_thing": "TEXT NOT NULL DEFAULT ''",
+            "user_name": "TEXT NOT NULL DEFAULT 'friend'",
+            "owner_user_id": "INTEGER REFERENCES users(id)",
         }
-
-        for column, definition in required_columns.items():
-            if column not in existing_columns:
-                conn.execute(
-                    f"ALTER TABLE journal_entries "
-                    f"ADD COLUMN {column} {definition}"
-                )
-
-        conn.execute(
-            """
-            UPDATE journal_entries
-            SET created_at = ?
-            WHERE created_at = '' OR created_at IS NULL
-            """,
-            (datetime.now().isoformat(timespec="seconds"),),
-        )
-
-        conn.execute(
-            """
-            UPDATE journal_entries
-            SET user_name = ?
-            WHERE user_name IS NULL OR user_name = ''
-            """,
-            ("friend",),
-        )
+        for column, definition in additions.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {column} {definition}")
+        conn.execute("UPDATE journal_entries SET created_at = ? WHERE created_at = '' OR created_at IS NULL", (datetime.now().isoformat(timespec="seconds"),))
 
 
-# Initialize the database when the application module loads.
 initialize_database()
-migrate_database()
 
 
-# --------------------------------------------------
-# 4. REQUEST VALIDATION
-# --------------------------------------------------
+class Credentials(BaseModel):
+    username: str = Field(min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128)
+
 
 class JournalEntry(BaseModel):
     mood: str = Field(default="Okay", max_length=30)
@@ -148,250 +97,142 @@ class JournalEntry(BaseModel):
     journal_text: str = Field(default="", max_length=12000)
     gratitude: str = Field(default="", max_length=2000)
     best_thing: str = Field(default="", max_length=2000)
-    user_name: str = Field(default="", max_length=100)
 
 
-# --------------------------------------------------
-# 5. FRONTEND
-# --------------------------------------------------
+def password_digest(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
 
-# Make files inside static available at /static/...
-app.mount(
-    "/static",
-    StaticFiles(directory=str(STATIC_DIR)),
-    name="static",
-)
+
+def issue_session(user_id: int, request: Request, response: Response):
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires = datetime.now().timestamp() + 60 * 60 * 24 * 30
+    expires_at = datetime.fromtimestamp(expires).isoformat(timespec="seconds")
+    with get_connection() as conn:
+        conn.execute("INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)", (token_hash, user_id, expires_at))
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, secure=request.url.scheme == "https",
+        samesite="strict", max_age=60 * 60 * 24 * 30, path="/",
+    )
+
+
+def require_user(session: Optional[str] = Cookie(default=None)):
+    if not session:
+        raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
+    token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT users.id, users.username FROM user_sessions JOIN users ON users.id = user_sessions.user_id WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?",
+            (token_hash, datetime.now().isoformat(timespec="seconds")),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
+    return {"id": row["id"], "username": row["username"], "token_hash": token_hash}
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")
 def home():
-    """Serve the main Little Pause page."""
-
     index_file = STATIC_DIR / "index.html"
-
     if not index_file.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Frontend not found. Add your index.html "
-                "file inside the static folder."
-            ),
-        )
-
+        raise HTTPException(status_code=404, detail="Frontend not found.")
     return FileResponse(index_file)
 
 
 @app.get("/manifest.webmanifest")
 def manifest():
-    """Serve the Progressive Web App manifest."""
-
-    manifest_file = STATIC_DIR / "manifest.webmanifest"
-
-    if not manifest_file.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="manifest.webmanifest was not found.",
-        )
-
-    return FileResponse(
-        manifest_file,
-        media_type="application/manifest+json",
-    )
+    path = STATIC_DIR / "manifest.webmanifest"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="manifest.webmanifest was not found.")
+    return FileResponse(path, media_type="application/manifest+json")
 
 
 @app.get("/sw.js")
 def service_worker():
-    """Serve the service worker."""
+    path = STATIC_DIR / "sw.js"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="sw.js was not found.")
+    return FileResponse(path, media_type="application/javascript")
 
-    worker_file = STATIC_DIR / "sw.js"
-
-    if not worker_file.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="sw.js was not found.",
-        )
-
-    return FileResponse(
-        worker_file,
-        media_type="application/javascript",
-    )
-
-
-# --------------------------------------------------
-# 6. HEALTH CHECK
-# --------------------------------------------------
 
 @app.get("/health")
 def health():
-    """Check whether the API is running."""
-
-    return {
-        "status": "ok",
-        "app": "Little Pause",
-        "timestamp": datetime.now().isoformat(
-            timespec="seconds"
-        ),
-    }
+    return {"status": "ok", "app": "Little Pause", "timestamp": datetime.now().isoformat(timespec="seconds")}
 
 
-# --------------------------------------------------
-# 7. SAVE A JOURNAL ENTRY
-# --------------------------------------------------
-
-@app.post("/api/entries", status_code=201)
-def save_entry(entry: JournalEntry):
-    """Save a new journal entry for the active user."""
-
-    now = datetime.now().isoformat(timespec="seconds")
-    user_name = normalize_user_name(entry.user_name)
-
+@app.post("/api/auth/register", status_code=201)
+def register(credentials: Credentials, request: Request, response: Response):
+    username = credentials.username.strip()
+    salt = secrets.token_bytes(16)
+    digest = password_digest(credentials.password, salt)
     try:
         with get_connection() as conn:
             cursor = conn.execute(
-                """
-                INSERT INTO journal_entries (
-                    created_at,
-                    mood,
-                    stress,
-                    anxiety,
-                    energy,
-                    journal_text,
-                    gratitude,
-                    best_thing,
-                    user_name
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    now,
-                    entry.mood,
-                    entry.stress,
-                    entry.anxiety,
-                    entry.energy,
-                    entry.journal_text,
-                    entry.gratitude,
-                    entry.best_thing,
-                    user_name,
-                ),
+                "INSERT INTO users (username, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (username, salt, digest, datetime.now().isoformat(timespec="seconds")),
             )
-
-            entry_id = cursor.lastrowid
-
-        return {
-            "ok": True,
-            "message": "Your journal entry was saved.",
-            "id": entry_id,
-            "created_at": now,
-            "user_name": user_name,
-        }
-
-    except sqlite3.Error as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Could not save your entry. "
-                "Please check the database configuration."
-            ),
-        ) from exc
+            user_id = cursor.lastrowid
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="That username is already registered. Please sign in instead.") from exc
+    issue_session(user_id, request, response)
+    return {"username": username}
 
 
-# --------------------------------------------------
-# 8. GET JOURNAL HISTORY
-# --------------------------------------------------
+@app.post("/api/auth/login")
+def login(credentials: Credentials, request: Request, response: Response):
+    with get_connection() as conn:
+        row = conn.execute("SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE", (credentials.username.strip(),)).fetchone()
+    if row is None or not hmac.compare_digest(password_digest(credentials.password, row["password_salt"]), row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    issue_session(row["id"], request, response)
+    return {"username": row["username"]}
+
+
+@app.get("/api/auth/me")
+def current_user(user=__import__("fastapi").Depends(require_user)):
+    return {"username": user["username"]}
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response, user=__import__("fastapi").Depends(require_user)):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
+    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
+    return {"ok": True}
+
+
+@app.post("/api/entries", status_code=201)
+def save_entry(entry: JournalEntry, user=__import__("fastapi").Depends(require_user)):
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO journal_entries (created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing, user_name, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now, entry.mood, entry.stress, entry.anxiety, entry.energy, entry.journal_text, entry.gratitude, entry.best_thing, user["username"], user["id"]),
+        )
+    return {"ok": True, "id": cursor.lastrowid, "created_at": now}
+
 
 @app.get("/api/entries")
-def list_entries(user_name: Optional[str] = Query(default=None)):
-    """Return the recent entries for a specific user."""
+def list_entries(user=__import__("fastapi").Depends(require_user)):
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing FROM journal_entries WHERE owner_user_id = ? ORDER BY id DESC LIMIT 100",
+            (user["id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
-    try:
-        sql = """
-            SELECT
-                id,
-                created_at,
-                mood,
-                stress,
-                anxiety,
-                energy,
-                journal_text,
-                gratitude,
-                best_thing,
-                user_name
-            FROM journal_entries
-        """
-        params = []
-        if user_name is not None:
-            normalized = normalize_user_name(user_name)
-            sql += " WHERE user_name = ? "
-            params.append(normalized)
-        sql += " ORDER BY id DESC LIMIT 100"
-
-        with get_connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
-
-        return [dict(row) for row in rows]
-
-    except sqlite3.Error as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="Could not load journal history.",
-        ) from exc
-
-
-# --------------------------------------------------
-# 9. DELETE A JOURNAL ENTRY
-# --------------------------------------------------
 
 @app.delete("/api/entries/{entry_id}")
-def delete_entry(
-    entry_id: int,
-    user_name: Optional[str] = Query(default=None),
-):
-    """Delete a journal entry by its ID for a specific user."""
+def delete_entry(entry_id: int, user=__import__("fastapi").Depends(require_user)):
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM journal_entries WHERE id = ? AND owner_user_id = ?", (entry_id, user["id"]))
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Journal entry not found.")
+    return {"ok": True, "id": entry_id}
 
-    try:
-        with get_connection() as conn:
-            if user_name is not None:
-                normalized = normalize_user_name(user_name)
-                cursor = conn.execute(
-                    "DELETE FROM journal_entries WHERE id = ? AND user_name = ?",
-                    (entry_id, normalized),
-                )
-            else:
-                cursor = conn.execute(
-                    "DELETE FROM journal_entries WHERE id = ?",
-                    (entry_id,),
-                )
-
-            if cursor.rowcount == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Journal entry not found.",
-                )
-
-        return {
-            "ok": True,
-            "message": "Journal entry deleted.",
-            "id": entry_id,
-        }
-
-    except sqlite3.Error as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="Could not delete the journal entry.",
-        ) from exc
-
-
-# --------------------------------------------------
-# 10. RUN LOCALLY
-# --------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-
-    port = int(os.getenv("PORT", "8000"))
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
