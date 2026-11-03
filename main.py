@@ -3,11 +3,11 @@ import hmac
 import os
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -15,17 +15,19 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "journal.db")))
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-
-app = FastAPI(title="Little Pause", description="A gentle journaling and calming app", version="1.0.0")
 SESSION_COOKIE = "littlepause_session"
+SESSION_LIFETIME = timedelta(days=30)
 PASSWORD_ITERATIONS = 310_000
+
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app = FastAPI(title="Little Pause", description="A gentle journaling and calming app", version="1.0.0")
 
 
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -62,6 +64,8 @@ def initialize_database():
                 owner_user_id INTEGER REFERENCES users(id)
             )
         """)
+
+        # Migrate the original single-user journal table without deleting entries.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
         additions = {
             "created_at": "TEXT NOT NULL DEFAULT ''",
@@ -75,10 +79,13 @@ def initialize_database():
             "user_name": "TEXT NOT NULL DEFAULT 'friend'",
             "owner_user_id": "INTEGER REFERENCES users(id)",
         }
-        for column, definition in additions.items():
-            if column not in columns:
-                conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {column} {definition}")
-        conn.execute("UPDATE journal_entries SET created_at = ? WHERE created_at = '' OR created_at IS NULL", (datetime.now().isoformat(timespec="seconds"),))
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {name} {definition}")
+        conn.execute(
+            "UPDATE journal_entries SET created_at = ? WHERE created_at = '' OR created_at IS NULL",
+            (datetime.now().isoformat(timespec="seconds"),),
+        )
 
 
 initialize_database()
@@ -103,16 +110,23 @@ def password_digest(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
 
 
-def issue_session(user_id: int, request: Request, response: Response):
+def create_session(user_id: int, request: Request, response: Response):
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires = datetime.now().timestamp() + 60 * 60 * 24 * 30
-    expires_at = datetime.fromtimestamp(expires).isoformat(timespec="seconds")
+    expires_at = datetime.utcnow() + SESSION_LIFETIME
     with get_connection() as conn:
-        conn.execute("INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)", (token_hash, user_id, expires_at))
+        conn.execute(
+            "INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            (token_hash, user_id, expires_at.isoformat(timespec="seconds")),
+        )
     response.set_cookie(
-        SESSION_COOKIE, token, httponly=True, secure=request.url.scheme == "https",
-        samesite="strict", max_age=60 * 60 * 24 * 30, path="/",
+        key=SESSION_COOKIE,
+        value=token,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=int(SESSION_LIFETIME.total_seconds()),
+        path="/",
     )
 
 
@@ -120,13 +134,19 @@ def require_user(session: Optional[str] = Cookie(default=None)):
     if not session:
         raise HTTPException(status_code=401, detail="Please sign in to access your journal.")
     token_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
+    now = datetime.utcnow().isoformat(timespec="seconds")
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT users.id, users.username FROM user_sessions JOIN users ON users.id = user_sessions.user_id WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?",
-            (token_hash, datetime.now().isoformat(timespec="seconds")),
+            """
+            SELECT users.id, users.username
+            FROM user_sessions JOIN users ON users.id = user_sessions.user_id
+            WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ?
+            """,
+            (token_hash, now),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
+        if row is None:
+            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
+            raise HTTPException(status_code=401, detail="Your session expired. Please sign in again.")
     return {"id": row["id"], "username": row["username"], "token_hash": token_hash}
 
 
@@ -135,10 +155,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/")
 def home():
-    index_file = STATIC_DIR / "index.html"
-    if not index_file.is_file():
+    path = STATIC_DIR / "index.html"
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Frontend not found.")
-    return FileResponse(index_file)
+    return FileResponse(path)
 
 
 @app.get("/manifest.webmanifest")
@@ -175,59 +195,78 @@ def register(credentials: Credentials, request: Request, response: Response):
             )
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="That username is already registered. Please sign in instead.") from exc
-    issue_session(user_id, request, response)
-    return {"username": username}
+        raise HTTPException(status_code=409, detail="That username already exists. Sign in or choose another username.") from exc
+    create_session(user_id, request, response)
+    return {"id": user_id, "username": username}
 
 
 @app.post("/api/auth/login")
 def login(credentials: Credentials, request: Request, response: Response):
     with get_connection() as conn:
-        row = conn.execute("SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE", (credentials.username.strip(),)).fetchone()
+        row = conn.execute(
+            "SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE",
+            (credentials.username.strip(),),
+        ).fetchone()
     if row is None or not hmac.compare_digest(password_digest(credentials.password, row["password_salt"]), row["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect username or password.")
-    issue_session(row["id"], request, response)
-    return {"username": row["username"]}
+        raise HTTPException(status_code=401, detail="Incorrect username or password. New here? Choose Create account first.")
+    create_session(row["id"], request, response)
+    return {"id": row["id"], "username": row["username"]}
 
 
 @app.get("/api/auth/me")
-def current_user(user=__import__("fastapi").Depends(require_user)):
-    return {"username": user["username"]}
+def current_user(user: dict = Depends(require_user)):
+    return {"id": user["id"], "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response, user=__import__("fastapi").Depends(require_user)):
+def logout(response: Response, user: dict = Depends(require_user)):
     with get_connection() as conn:
         conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (user["token_hash"],))
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
+    response.delete_cookie(key=SESSION_COOKIE, path="/", httponly=True, samesite="lax")
     return {"ok": True}
 
 
 @app.post("/api/entries", status_code=201)
-def save_entry(entry: JournalEntry, user=__import__("fastapi").Depends(require_user)):
+def save_entry(entry: JournalEntry, user: dict = Depends(require_user)):
     now = datetime.now().isoformat(timespec="seconds")
     with get_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO journal_entries (created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing, user_name, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (now, entry.mood, entry.stress, entry.anxiety, entry.energy, entry.journal_text, entry.gratitude, entry.best_thing, user["username"], user["id"]),
+            """
+            INSERT INTO journal_entries (
+                created_at, mood, stress, anxiety, energy, journal_text,
+                gratitude, best_thing, user_name, owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now, entry.mood, entry.stress, entry.anxiety, entry.energy, entry.journal_text,
+             entry.gratitude, entry.best_thing, user["username"], user["id"]),
         )
     return {"ok": True, "id": cursor.lastrowid, "created_at": now}
 
 
 @app.get("/api/entries")
-def list_entries(user=__import__("fastapi").Depends(require_user)):
+def list_entries(user: dict = Depends(require_user)):
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, created_at, mood, stress, anxiety, energy, journal_text, gratitude, best_thing FROM journal_entries WHERE owner_user_id = ? ORDER BY id DESC LIMIT 100",
+            """
+            SELECT id, created_at, mood, stress, anxiety, energy,
+                   journal_text, gratitude, best_thing
+            FROM journal_entries
+            WHERE owner_user_id = ?
+            ORDER BY id DESC
+            LIMIT 100
+            """,
             (user["id"],),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
 @app.delete("/api/entries/{entry_id}")
-def delete_entry(entry_id: int, user=__import__("fastapi").Depends(require_user)):
+def delete_entry(entry_id: int, user: dict = Depends(require_user)):
     with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM journal_entries WHERE id = ? AND owner_user_id = ?", (entry_id, user["id"]))
+        cursor = conn.execute(
+            "DELETE FROM journal_entries WHERE id = ? AND owner_user_id = ?",
+            (entry_id, user["id"]),
+        )
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Journal entry not found.")
     return {"ok": True, "id": entry_id}
